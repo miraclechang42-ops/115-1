@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <title>空中幾何魔法師</title>
+  <!-- 引入 MediaPipe Hands 函式庫 -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+  <style>
+    body {
+      margin: 0; padding: 0;
+      background-color: #1a1a2e; color: white;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      overflow: hidden;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      height: 100vh;
+    }
+    #game-container {
+      position: relative; width: 800px; height: 600px;
+      border: 4px solid #4ecca3; border-radius: 12px;
+      background-color: #000; overflow: hidden;
+      box-shadow: 0 0 20px rgba(78, 204, 163, 0.5);
+    }
+    /* 隱藏真實影片，全靠 Canvas 來翻轉並繪製所有內容 */
+    video { display: none; }
+    canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+    
+    #ui-layer {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      pointer-events: none; display: flex; flex-direction: column;
+      justify-content: space-between; padding: 20px; box-sizing: border-box;
+      z-index: 5;
+    }
+    
+    .panel {
+      pointer-events: auto; background: rgba(15, 52, 96, 0.9);
+      padding: 20px; border-radius: 10px; border: 2px solid #4ecca3;
+      text-align: center; max-width: 400px; margin: auto;
+      z-index: 10;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+    }
+    h1, h2 { margin-top: 0; color: #4ecca3; text-shadow: 1px 1px 2px black;}
+    p { font-size: 16px; line-height: 1.5; text-shadow: 1px 1px 2px black;}
+    button {
+      background: #e94560; color: white; border: none; padding: 10px 20px;
+      margin: 5px; border-radius: 5px; font-size: 16px; cursor: pointer;
+      transition: background 0.2s;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+    }
+    button:hover { background: #ff5775; }
+    
+    #loading { 
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); 
+      font-size: 24px; color: #4ecca3; text-align: center; display: none; 
+      background: rgba(0,0,0,0.8); padding: 25px; border-radius: 10px;
+      border: 1px solid #4ecca3; z-index: 15;
+    }
+    #status-bar { 
+      display: flex; justify-content: space-between; font-size: 20px; font-weight: bold;
+      background: rgba(0, 0, 0, 0.6); padding: 10px 15px; border-radius: 8px;
+    }
+  </style>
+</head>
+<body>
+
+<div id="game-container">
+  <!-- 用於捕獲影像但隱藏，僅作為數據源 -->
+  <video id="input_video" width="800" height="600" autoplay playsinline></video>
+  <!-- 用於最終呈現，影像和特效都畫在這裡 -->
+  <canvas id="output_canvas" width="800" height="600"></canvas>
+  
+  <div id="loading">載入魔法影像中，請稍候...</div>
+
+  <div id="ui-layer">
+    <div id="status-bar" style="display:none;">
+      <span id="level-title">第一關：魔法描圖師</span>
+      <span id="instruction">請用食指觸碰發光的星星點！</span>
+    </div>
+
+    <!-- 彈出視窗 -->
+    <div id="dialog-panel" class="panel">
+      <h2 id="dialog-title">歡迎來到空中幾何魔法師</h2>
+      <p id="dialog-text">舉起你的手，使用食指當作魔法杖，在攝影機前描繪幾何圖形吧！</p>
+      <div id="dialog-buttons">
+        <button onclick="startGame()">開始第一關</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const videoElement = document.getElementById('input_video');
+  const canvasElement = document.getElementById('output_canvas');
+  const canvasCtx = canvasElement.getContext('2d');
+  
+  const loading = document.getElementById('loading');
+  const statusBar = document.getElementById('status-bar');
+  const levelTitle = document.getElementById('level-title');
+  const instruction = document.getElementById('instruction');
+  const dialogPanel = document.getElementById('dialog-panel');
+  const dialogTitle = document.getElementById('dialog-title');
+  const dialogText = document.getElementById('dialog-text');
+  const dialogButtons = document.getElementById('dialog-buttons');
+
+  let currentLevel = 0;
+  let targetPoints = [];
+  let currentPointIndex = 0;
+  let handPosition = { x: 0, y: 0 };
+  let isHandDetected = false;
+  let showGuides = true;
+  
+  const shapes = {
+    triangle: [{x: 0.5, y: 0.2}, {x: 0.2, y: 0.7}, {x: 0.8, y: 0.7}],
+    square: [{x: 0.3, y: 0.3}, {x: 0.7, y: 0.3}, {x: 0.7, y: 0.7}, {x: 0.3, y: 0.7}],
+    rectangle: [{x: 0.2, y: 0.4}, {x: 0.8, y: 0.4}, {x: 0.8, y: 0.6}, {x: 0.2, y: 0.6}],
+    circle: [] 
+  };
+  
+  for (let i = 0; i < 8; i++) {
+    const angle = (i * Math.PI * 2) / 8;
+    shapes.circle.push({ x: 0.5 + 0.25 * Math.cos(angle), y: 0.5 + 0.3 * Math.sin(angle) });
+  }
+
+  const levels = [
+    {
+      title: "第一關｜魔法描圖師",
+      desc: "沿著虛線，用食指點亮所有頂點星星來完成【三角形】！",
+      shape: "triangle",
+      guides: true,
+      onComplete: () => showQuestion("太棒了！", "這個圖形是三角形。它有幾個頂點？", ["3個", "4個"], 0, () => startLevel(1))
+    },
+    {
+      title: "第二關｜圖形建造師",
+      desc: "任務：請畫出一個【正方形】（有四個相等邊與頂點的圖形）。",
+      shape: "square",
+      guides: true,
+      onComplete: () => showQuestion("精準的魔法！", "正方形有幾條邊？", ["3條", "4條"], 1, () => startLevel(2))
+    },
+    {
+      title: "第三關｜魔法世界修復任務",
+      desc: "魔法橋樑斷了！請根據光點畫出【長方形】來修復橋樑！",
+      shape: "rectangle",
+      guides: true,
+      onComplete: () => showQuestion("修復成功！", "長方形和正方形一樣都有四個頂點，對嗎？", ["對", "不對"], 0, () => startLevel(3))
+    },
+    {
+      title: "第四關｜幾何大挑戰",
+      desc: "隱藏輔助線！憑感覺點亮所有的光點來畫出【圓形】！",
+      shape: "circle",
+      guides: false, 
+      onComplete: () => showQuestion("大師誕生！", "圓形有頂點嗎？", ["有", "沒有，它很圓滑"], 1, () => {
+        showDialog("通關完成！", "你已經成為真正的空中幾何魔法師！<br>獲得【幾何大師徽章】★", "<button onclick='startLevel(0)'>再玩一次</button>");
+      })
+    }
+  ];
+
+  // 初始化 MediaPipe Hands
+  const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+  hands.setOptions({ 
+    maxNumHands: 1, 
+    modelComplexity: 1, 
+    minDetectionConfidence: 0.7, 
+    minTrackingConfidence: 0.7 
+  });
+  hands.onResults(onResults);
+
+  const camera = new Camera(videoElement, {
+    onFrame: async () => { await hands.send({image: videoElement}); },
+    width: 640, height: 480
+  });
+
+  function startGame() {
+    hideDialog();
+    loading.style.display = 'block';
+    loading.innerHTML = '正在開啟攝影機並載入魔法 AI...<br><span style="font-size:16px;color:#e94560;">(請在瀏覽器上方彈出的視窗點選「允許」相機權限)</span>';
+
+    camera.start().then(() => { 
+      loading.style.display = 'none'; 
+      startLevel(0);                  
+    }).catch((err) => {
+      alert('無法存取攝影機！請確定你有接上視訊鏡頭，並允許網頁使用相機。\n錯誤詳細資訊：' + err);
+      loading.innerHTML = '無法讀取攝影機 😢';
+    });
+  }
+
+  function startLevel(levelIndex) {
+    currentLevel = levelIndex;
+    const lvData = levels[currentLevel];
+    
+    levelTitle.innerText = lvData.title;
+    instruction.innerText = lvData.desc;
+    targetPoints = [...shapes[lvData.shape]];
+    showGuides = lvData.guides;
+    currentPointIndex = 0;
+    
+    statusBar.style.display = 'flex';
+    hideDialog();
+  }
+
+  // 渲染影片和標註圖形
+  function onResults(results) {
+    canvasCtx.save();
+    
+    // 1. 重要：在 Canvas 實作「鏡像翻轉」，讓使用者像照鏡子一樣自然
+    canvasCtx.translate(canvasElement.width, 0);
+    canvasCtx.scale(-1, 1);
+    
+    // 2. 將攝影機視訊幀畫在最底層，填滿畫布
+    canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+    // 恢復座標系統以正常繪製文字或特定的不翻轉 UI (在此我們維持鏡面畫幾何圖形與點)
+    isHandDetected = results.multiHandLandmarks && results.multiHandLandmarks.length > 0;
+
+    if (isHandDetected) {
+      const landmarks = results.multiHandLandmarks[0];
+      const indexTip = landmarks[8]; // 食指指尖
+      handPosition = { x: indexTip.x, y: indexTip.y };
+
+      // 畫出魔法光點 (手指位置)
+      drawMagicCursor(handPosition.x * canvasElement.width, handPosition.y * canvasElement.height);
+      
+      if (dialogPanel.style.display === 'none' && currentPointIndex < targetPoints.length) {
+        checkHit(handPosition);
+      }
+    }
+
+    if (dialogPanel.style.display === 'none' && targetPoints.length > 0) {
+      drawLevelGraphics();
+    }
+    
+    canvasCtx.restore();
+  }
+
+  function drawMagicCursor(x, y) {
+    canvasCtx.beginPath();
+    canvasCtx.arc(x, y, 18, 0, 2 * Math.PI);
+    canvasCtx.fillStyle = 'rgba(78, 204, 163, 0.4)'; // 外部光暈
+    canvasCtx.fill();
+
+    canvasCtx.beginPath();
+    canvasCtx.arc(x, y, 10, 0, 2 * Math.PI);
+    canvasCtx.fillStyle = '#fff'; // 核心亮點
+    canvasCtx.shadowBlur = 15;
+    canvasCtx.shadowColor = '#4ecca3';
+    canvasCtx.fill();
+    canvasCtx.shadowBlur = 0; // 重置陰影避免影響其他繪圖
+  }
+
+  function drawLevelGraphics() {
+    const w = canvasElement.width;
+    const h = canvasElement.height;
+
+    // 繪製關卡虛線
+    if (showGuides && targetPoints.length > 1) {
+      canvasCtx.beginPath();
+      canvasCtx.moveTo(targetPoints[0].x * w, targetPoints[0].y * h);
+      for (let i = 1; i < targetPoints.length; i++) {
+        canvasCtx.lineTo(targetPoints[i].x * w, targetPoints[i].y * h);
+      }
+      canvasCtx.lineTo(targetPoints[0].x * w, targetPoints[0].y * h);
+      canvasCtx.strokeStyle = 'rgba(255, 255, 255, 0.5)'; // 提高對比度確保在相機背景可見
+      canvasCtx.lineWidth = 4;
+      canvasCtx.setLineDash([10, 10]);
+      canvasCtx.stroke();
+      canvasCtx.setLineDash([]);
+    }
+
+    // 畫已連接的實線
+    if (currentPointIndex > 0) {
+      canvasCtx.beginPath();
+      canvasCtx.moveTo(targetPoints[0].x * w, targetPoints[0].y * h);
+      for (let i = 1; i < currentPointIndex; i++) {
+        canvasCtx.lineTo(targetPoints[i].x * w, targetPoints[i].y * h);
+      }
+      if (currentPointIndex === targetPoints.length) {
+        canvasCtx.lineTo(targetPoints[0].x * w, targetPoints[0].y * h);
+      }
+      canvasCtx.strokeStyle = '#e94560';
+      canvasCtx.lineWidth = 6;
+      canvasCtx.stroke();
+    }
+
+    // 畫出檢查點「魔法星星點」
+    for (let i = 0; i < targetPoints.length; i++) {
+      const px = targetPoints[i].x * w;
+      const py = targetPoints[i].y * h;
+      
+      // 外發光圓圈
+      canvasCtx.beginPath();
+      canvasCtx.arc(px, py, 22, 0, 2 * Math.PI);
+      canvasCtx.fillStyle = 'rgba(0, 0, 0, 0.4)'; // 黑色半透明底，防止背景雜亂看不清
+      canvasCtx.fill();
+      
+      canvasCtx.beginPath();
+      canvasCtx.arc(px, py, 14, 0, 2 * Math.PI);
+      
+      if (i < currentPointIndex) {
+        canvasCtx.fillStyle = '#e94560'; // 已完成: 紅色
+      } else if (i === currentPointIndex) {
+        // 目標點：金黃色閃爍
+        canvasCtx.fillStyle = (Date.now() % 500 > 250) ? '#ffea00' : '#ffffff';
+        canvasCtx.shadowBlur = 15;
+        canvasCtx.shadowColor = '#ffea00';
+      } else {
+        canvasCtx.fillStyle = 'rgba(249, 202, 36, 0.7)'; // 未來點：半透明黃
+      }
+      
+      canvasCtx.fill();
+      canvasCtx.shadowBlur = 0; // 重置
+    }
+  }
+
+  function checkHit(fingerPos) {
+    const target = targetPoints[currentPointIndex];
+    const dx = fingerPos.x - target.x;
+    const dy = fingerPos.y - target.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+
+    // 0.08 是大約 8% 的畫面寬度，對於 800x600 相當於約 64 像素
+    if (distance < 0.08) {
+      currentPointIndex++;
+      
+      if (currentPointIndex === targetPoints.length) {
+        setTimeout(() => {
+          levels[currentLevel].onComplete();
+        }, 500); 
+      }
+    }
+  }
+
+  function showDialog(title, text, htmlButtons) {
+    dialogTitle.innerText = title;
+    dialogText.innerHTML = text;
+    dialogButtons.innerHTML = htmlButtons;
+    dialogPanel.style.display = 'block';
+  }
+
+  function hideDialog() {
+    dialogPanel.style.display = 'none';
+  }
+
+  function showQuestion(title, question, options, correctIndex, nextAction) {
+    let btnHtml = "";
+    options.forEach((opt, idx) => {
+      btnHtml += `<button onclick="if(${idx} === ${correctIndex}){ ${nextAction.name ? nextAction.name+'()' : 'nextAction_temp()'} } else { alert('再想想看喔！') }">${opt}</button> `;
+    });
+    window.nextAction_temp = nextAction; 
+    showDialog(title, question, btnHtml);
+  }
+
+</script>
+</body>
+</html>
