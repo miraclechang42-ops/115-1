@@ -78,7 +78,7 @@ const SHAPES=[
 ];
 const FING=[{n:'食指',i:8},{n:'中指',i:12},{n:'無名指',i:16},{n:'小指',i:20}];
 const COLS=[['橘色','#ff9f1c'],['紅色','#ff3b5c'],['藍色','#3b82f6'],['紫色','#c77dff'],['青色','#00e5ff'],['白色','#ffffff']];
-const MODES=['捏合落筆','按鈕切換','一直畫'];
+const MODES=['指向落筆','捏合落筆','按鈕切換','一直畫'];
 let W,H,S,tol,lvl=0,trail=[],samples=[],lit=[],done=false,cur=null,running=false,mouse=false;
 let fi=0,ci=0,mi=0,pen=false,prevPen=false,rat=null,pc=0,jump=0;
 /* One Euro Filter：慢速時強力防抖、快速時低延遲 */
@@ -97,10 +97,10 @@ function updUI(){
   $('bCol').innerHTML=`🎨 <span style="color:${COLS[ci][1]}">●</span> ${COLS[ci][0]}`;
   $('bMode').textContent='🔧 '+MODES[mi];
 }
-$('bPen').onclick=()=>{if(mi===1){pen=!pen;updUI()}};
+$('bPen').onclick=()=>{if(mi===2){pen=!pen;updUI()}};
 $('bFin').onclick=()=>{fi=(fi+1)%FING.length;updUI()};
 $('bCol').onclick=()=>{ci=(ci+1)%COLS.length;updUI()};
-$('bMode').onclick=()=>{mi=(mi+1)%MODES.length;pen=mi===2;updUI()};
+$('bMode').onclick=()=>{mi=(mi+1)%MODES.length;pen=mi===3;pc=0;updUI()};
 $('bClr').onclick=()=>{trail=[];lit=samples.map(()=>false);done=false;$('card').style.display='none'};
 
 function sample(poly){
@@ -196,11 +196,13 @@ function startTracking(){
     const dist=(p,q)=>Math.hypot((p.x-q.x)*vw,(p.y-q.y)*vh);
     const raw=dist(a,b)/dist(l[0],l[9]);
     rat=rat==null?raw:rat*.5+raw*.5;
-    if(mi===0){ /* 連續 3 格畫面都符合才切換，避免誤判 */
-      if(!pen&&rat<.28){if(++pc>=3){pen=true;pc=0}}
-      else if(pen&&rat>.45){if(++pc>=3){pen=false;pc=0}}
-      else pc=0;
-    }
+    let want=null; /* 目標落筆狀態；連續 3 格畫面都一致才切換，避免誤判 */
+    if(mi===0){ /* 只伸出所選手指 = 落筆；張開手掌或握拳 = 提筆 */
+      const e=[[5,8],[9,12],[13,16],[17,20]].map(([m,t])=>dist(l[t],l[0])/dist(l[m],l[0]));
+      const k=[8,12,16,20].indexOf(FING[fi].i);
+      want=e[k]>1.6&&e.every((v,j)=>j===k||v<1.5);
+    }else if(mi===1)want=pen?!(rat>.45):rat<.28;
+    if(want!=null){if(want!==pen){if(++pc>=3){pen=want;pc=0}}else pc=0}
     step((1-b.x)*W,b.y*H,performance.now()); /* 筆尖 = 所選手指的指尖 */
   });
   (async function loop(){if(V.readyState>=2)await hands.send({image:V});requestAnimationFrame(loop)})();
