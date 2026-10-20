@@ -80,7 +80,16 @@ const FING=[{n:'食指',i:8},{n:'中指',i:12},{n:'無名指',i:16},{n:'小指',
 const COLS=[['橘色','#ff9f1c'],['紅色','#ff3b5c'],['藍色','#3b82f6'],['紫色','#c77dff'],['青色','#00e5ff'],['白色','#ffffff']];
 const MODES=['捏合落筆','按鈕切換','一直畫'];
 let W,H,S,tol,lvl=0,trail=[],samples=[],lit=[],done=false,cur=null,running=false,mouse=false;
-let fi=0,ci=0,mi=0,pen=false,prevPen=false;
+let fi=0,ci=0,mi=0,pen=false,prevPen=false,rat=null,pc=0,jump=0;
+/* One Euro Filter：慢速時強力防抖、快速時低延遲 */
+const LP=(a,x,p)=>p==null?x:a*x+(1-a)*p;
+function mkF(mc=1.5,beta=.04,dc=1){let px=null,dx=null,t0=0,pf=null;
+  const al=(c,dt)=>1/(1+1/(2*Math.PI*c)/dt);
+  return{reset(){px=null;dx=null;pf=null},f(x,t){
+    if(px==null){px=x;pf=x;t0=t;return x}
+    const dt=Math.max((t-t0)/1000,.001);t0=t;const d=(x-px)/dt;px=x;
+    dx=LP(al(dc,dt),d,dx);pf=LP(al(mc+beta*Math.abs(dx),dt),x,pf);return pf}}}
+const FX=mkF(),FY=mkF();
 
 function updUI(){
   $('bPen').textContent=pen?'✏️ 落筆中':'✋ 提筆中';
@@ -113,8 +122,12 @@ function loadLevel(){trail=[];lit=[];done=false;layout();$('card').style.display
   $('stars').textContent='⭐'.repeat(lvl)+'☆'.repeat(SHAPES.length-lvl);updUI()}
 function add(x,y){
   if(done)return;
-  trail.push({x,y,c:COLS[ci][1]});
-  samples.forEach((s,i)=>{if(!lit[i]&&Math.hypot(s.x-x,s.y-y)<tol)lit[i]=true});
+  const pr=trail.length?trail[trail.length-1]:null,c=COLS[ci][1];
+  if(pr){const n=Math.ceil(Math.hypot(x-pr.x,y-pr.y)/(tol*.5));
+    for(let k=1;k<n;k++)trail.push({x:pr.x+(x-pr.x)*k/n,y:pr.y+(y-pr.y)*k/n,c})}
+  trail.push({x,y,c});
+  for(let k=Math.max(0,trail.length-40);k<trail.length;k++){const q=trail[k];if(!q)continue;
+    samples.forEach((s,i)=>{if(!lit[i]&&Math.hypot(s.x-q.x,s.y-q.y)<tol)lit[i]=true})}
   const pts=trail.filter(Boolean);
   if(pts.length>90){
     const ok=pts.filter(p=>samples.some(s=>Math.hypot(s.x-p.x,s.y-p.y)<tol*1.5)).length/pts.length;
@@ -161,8 +174,10 @@ function dwell(x,y){
 function showCur(){const el=$('cur');if(!cur){el.style.display='none';return}
   el.style.display='block';el.style.left=cur.x/W*100+'%';el.style.top=cur.y/H*100+'%';
   el.style.background=pen?COLS[ci][1]:'transparent';el.style.borderColor=pen?'#fff':COLS[ci][1]}
-function step(x,y){
-  cur=cur?{x:cur.x*.6+x*.4,y:cur.y*.6+y*.4}:{x,y};
+function step(x,y,t){
+  const nx=FX.f(x,t),ny=FY.f(y,t);
+  if(cur&&Math.hypot(nx-cur.x,ny-cur.y)>W*.25&&++jump<4)return; /* 忽略突然亂跳的點 */
+  jump=0;cur={x:nx,y:ny};
   const over=dwell(cur.x,cur.y),down=pen&&!over&&!done;
   if(down)add(cur.x,cur.y);else if(prevPen)trail.push(null);
   prevPen=down;showCur();updUI();
@@ -173,15 +188,20 @@ function startTracking(){
   if(running)return;running=true;$('conn').style.display='none';loadLevel();
   V.play().catch(()=>{});
   hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}`});
-  hands.setOptions({maxNumHands:1,modelComplexity:0,minDetectionConfidence:.6,minTrackingConfidence:.5});
+  hands.setOptions({maxNumHands:1,modelComplexity:1,minDetectionConfidence:.7,minTrackingConfidence:.6});
   hands.onResults(r=>{
     const l=r.multiHandLandmarks&&r.multiHandLandmarks[0];
-    if(!l){if(prevPen){trail.push(null);prevPen=false}cur=null;showCur();return}
-    const vw=V.videoWidth||640,vh=V.videoHeight||480,f=FING[fi].i,a=l[4],b=l[f];
+    if(!l){if(prevPen){trail.push(null);prevPen=false}cur=null;FX.reset();FY.reset();pc=0;showCur();return}
+    const vw=V.videoWidth||640,vh=V.videoHeight||480,a=l[4],b=l[FING[fi].i];
     const dist=(p,q)=>Math.hypot((p.x-q.x)*vw,(p.y-q.y)*vh);
-    const ratio=dist(a,b)/dist(l[0],l[9]);
-    if(mi===0){if(ratio<.3)pen=true;else if(ratio>.45)pen=false}
-    step((1-(a.x+b.x)/2)*W,(a.y+b.y)/2*H);
+    const raw=dist(a,b)/dist(l[0],l[9]);
+    rat=rat==null?raw:rat*.5+raw*.5;
+    if(mi===0){ /* 連續 3 格畫面都符合才切換，避免誤判 */
+      if(!pen&&rat<.28){if(++pc>=3){pen=true;pc=0}}
+      else if(pen&&rat>.45){if(++pc>=3){pen=false;pc=0}}
+      else pc=0;
+    }
+    step((1-b.x)*W,b.y*H,performance.now()); /* 筆尖 = 所選手指的指尖 */
   });
   (async function loop(){if(V.readyState>=2)await hands.send({image:V});requestAnimationFrame(loop)})();
 }
